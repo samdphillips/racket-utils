@@ -9,10 +9,13 @@
     (define trace-ch (make-channel))
     (define get-ch   (make-channel))
 
-    (define (serve t trace)
+    (define t (current-milliseconds))
+    (define (serve trace)
       (sync (handle-evt trace-ch
                         (lambda (x)
-                          (serve (cons (list (- (current-milliseconds) t) x)
+                          (serve (cons (list (quotient 
+                                               (- (current-milliseconds) t) 1000)
+                                             x)
                                        trace))))
             (handle-evt get-ch
                         (lambda (rpy-ch)
@@ -20,11 +23,13 @@
                           (serve trace)))))
 
     (define (trace v)
-      (channel-put trace-ch v))
+      (channel-put trace-ch v)
+      (sleep 0))
 
     (define (get)
       (define rpy-ch (make-channel))
       (channel-put get-ch rpy-ch)
+      (sleep 0)
       (channel-get rpy-ch))
 
     (thread (thunk (serve null)))
@@ -79,57 +84,71 @@
                    (wrap-evt always-evt (const v)))]
                 [else never-evt])
       (nack-guard-evt
-        (lambda (cancel-evt)
+        (lambda (nack-evt)
           (define ch (make-channel))
+
+          (define cancel-evt
+            (handle-evt nack-evt
+                        (thunk* (cleanup-thunk))))
+
           (define (poll)
-            (cond [(poll-thunk) => (curry channel-put ch)]
+            (cond [(poll-thunk) => (lambda (v)
+                                     (sync cancel-evt
+                                           (channel-put-evt ch v)))]
                   [else #f]))
+
           (define (poller)
-            (sync (handle-evt cancel-evt
-                              (thunk*
-                                (cleanup-thunk)))
+            (sync cancel-evt
                   (handle-evt (timer-evt (interval-thunk))
                               (thunk* (or (poll) (poller))))))
           (thread poller)
           ch))))))
 
 (module+ test
-  (sync (wrap-evt (timer-evt 4000)
-                  (thunk*
-                    (printf "[~a] finished~%"
-                            (current-inexact-milliseconds))))
-        (poll-evt (thunk
-                    (printf "[~a] polling~%"
-                            (current-inexact-milliseconds))
-                    #f)
-                  #:cleanup
-                  (thunk
-                    (printf "[~a] cancelling~%"
-                            (current-inexact-milliseconds)))))
-  
-  (sleep 0)
-  'ok)
+  (test-case "poll-evt calls cleanup thunk if not chosen"
+    (define-values (trace get) (make-tracer))
+
+    (sync (wrap-evt (timer-evt 7000)
+                    (thunk* (trace 'finished)))
+          (poll-evt (thunk (trace 'polling) #f)
+                    #:interval
+                    (const 2000)
+                    #:cleanup
+                    (thunk (trace 'cancelling))))
+    
+    (sleep 0)
+    (check-equal? (get)
+                  '((2 polling) (4 polling) (6 polling)
+                    (7 finished) (7 cancelling)))))
 
 (module+ test
-  (let ([count 2])
-    (sync (poll-evt (thunk
-                      (printf "[~a] polling~%"
-                              (current-inexact-milliseconds))
-                      (cond [(zero? count) 'ok]
-                            [else
-                              (set! count (sub1 count))
-                              #f]))))))
-                          
+  (test-case "poll-evt is ready with the value of  poll when it returns non-false"
+    (define-values (trace get) (make-tracer))
+    (define count 2)
+
+    (trace
+      (sync (poll-evt (thunk
+                        (trace 'polling)
+                        (cond [(zero? count) 'ok]
+                              [else
+                                (set! count (sub1 count))
+                                #f])))))
+    (check-equal? (get)
+                  '((1 polling) (2 polling) (3 polling) (3 ok)))))
+
 
 (module+ test
-  (sync/timeout 0 (poll-evt (thunk
-                              (printf "[~a] polling~%"
-                                      (current-inexact-milliseconds))
-                              #f))))
+  (test-case "poll-evt with sync/timeout doesn't run polling thread"
+    (define-values (trace get) (make-tracer))
 
-(module+ test
-  (sync/timeout 0 (poll-evt (thunk
-                              (printf "[~a] polling~%"
-                                      (current-inexact-milliseconds))
-                              'ok))))
+    (check-false (sync/timeout 0 (poll-evt (thunk
+                                             (trace 'one)
+                                             #f))))
+    (check-equal? (get) '((0 one)))
+
+    (check-eq? (sync/timeout 0 (poll-evt (thunk
+                                           (trace 'two) 
+                                           'ok)))
+               'ok)
+    (check-equal? (get) '((0 one) (0 two)))))
 
