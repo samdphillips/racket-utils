@@ -5,8 +5,11 @@
                      (only-in racket/syntax
                               format-id
                               generate-temporary))
+
          (only-in racket/function
-                  thunk))
+                  thunk)
+         (only-in racket/match
+                  match-define))
 
 (module+ test
   (require rackunit))
@@ -74,7 +77,7 @@
            (log-message logger 
                         'level 
                         (format fmt-str v (... ...))
-                        (current-continuation-marks)))))]))
+                        (vector (current-continuation-marks) #f)))))]))
 
 (define-syntax (declare-logger stx)
   (syntax-parse stx
@@ -95,6 +98,60 @@
         (define logger (find-or-create-logger! 'logger-name))
         log-stx ...))]))
 
+(define (string-left-trim s)
+  (define i
+    (for/or ([i (in-naturals)]
+             [c (in-string s)])
+      (and (not (char-whitespace? c)) i)))
+  (substring s i))
+
+(module+ test
+  (check string=? (string-left-trim "abc")   "abc")
+  (check string=? (string-left-trim "  abc") "abc")
+  (check string=? (string-left-trim "abc  ") "abc  "))
+
+
+(struct log-entry (timestamp category level message marks extra))
+
+;; vector->log-entry
+;; converts a vector value as produced by synchronizing on a log-receiver into
+;; a log-entry.
+(define (vector->log-entry v)
+  (match-define (vector level msg (vector marks extra)) v)
+  (define i
+    (for/or ([i (in-naturals)]
+             [c (in-string msg)])
+       (and (char=? c #\:) i)))
+  (define category (string->symbol (substring msg 0 i)))
+  (define message  (string-left-trim (substring msg (add1 i))))
+
+  (log-entry (current-milliseconds)
+             category
+             level
+             message
+             marks
+             extra))
+
+(module+ test
+  (test-case "check log-entry from vector"
+    (define e
+      (vector->log-entry (vector 'info "a.b: helloworld" (vector 'c 'd))))
+    (check-eq? (log-entry-level e)    'info)
+    (check-eq? (log-entry-category e) 'a.b)
+    (check string=? (log-entry-message e) "helloworld")
+    (check-eq? (log-entry-marks e) 'c)
+    (check-eq? (log-entry-extra e) 'd)))
+
+
+
+; which logger and level?
+; what state to haul around?
+;  
+; (make-log-appender logger? log-level? any?) -> log-appender?
+; (close-log-appender log-appender)
+
+
 (provide find-or-create-logger!
          define-log-syntax
          declare-logger)
+
